@@ -9,74 +9,100 @@ import auto_pr
 
 class AutoPrTests(unittest.TestCase):
     def setUp(self):
-        self.environment = patch.dict(os.environ, {
-            "GITHUB_REPOSITORY": "owner/repo",
-            "GITHUB_REF_NAME": "feature/example",
-            "GITHUB_SHA": "a" * 40,
-            "PR_BASE": "develop",
-        })
-        self.environment.start()
-        self.addCleanup(self.environment.stop)
+        self.template = Path('.github/pull_request_template.md').read_text()
+        self.changes = {
+            'merge_base': 'b' * 40,
+            'commits': [{'sha': 'a' * 40, 'commit': {'message': 'feat: response'}}],
+            'files': [{'path': 'src/Response.kt', 'added': '10', 'deleted': '2'}],
+        }
+        for mocker in (
+            patch.dict(os.environ, {'GITHUB_REPOSITORY': 'owner/repo',
+                                   'GITHUB_REF_NAME': 'feature/example', 'PR_BASE': 'develop'}),
+            patch('auto_pr.collect_changes', return_value=self.changes),
+            patch('auto_pr.git', return_value='a' * 40),
+        ):
+            mocker.start()
+            self.addCleanup(mocker.stop)
 
-    @patch("auto_pr.api")
-    def test_existing_pr_is_not_modified(self, api):
-        api.return_value = [{"html_url": "https://example.test/pr/1"}]
+    def body(self):
+        return auto_pr.build_body(self.template, self.changes, 'owner/repo', 'develop', 'a' * 40)
+
+    @patch('auto_pr.api')
+    def test_unmarked_pr_is_preserved(self, api):
+        api.return_value = [{'base': {'ref': 'develop'}, 'body': 'Handwritten'}]
         auto_pr.main()
-        self.assertEqual(api.call_count, 1)
+        self.assertEqual(1, api.call_count)
 
-    @patch("auto_pr.api")
-    def test_no_changes_skip_creation(self, api):
-        api.side_effect = [[], {"ahead_by": 0}]
+    @patch('auto_pr.api')
+    def test_no_net_changes_skip_creation(self, api):
+        api.return_value = []
+        self.changes['files'] = []
         auto_pr.main()
-        self.assertEqual(api.call_count, 2)
+        self.assertEqual(1, api.call_count)
 
-    @patch("auto_pr.api")
-    def test_new_pr_is_draft_and_retains_unverified_status(self, api):
-        commit = {"sha": "a" * 40, "commit": {"message": "feat: response $(touch nope)\n\nCloses #42"}}
-        api.side_effect = [[], {"ahead_by": 1, "total_commits": 1, "commits": [commit]},
-                           commit, {"html_url": "https://example.test/pr/2"}]
+    @patch('auto_pr.api')
+    def test_new_pr_summarizes_whole_branch(self, api):
+        self.changes['commits'].append({'sha': 'c' * 40, 'commit': {'message': 'fix: followup'}})
+        api.side_effect = [[], {'html_url': 'https://example.test/1'}]
         auto_pr.main()
         endpoint, payload = api.call_args.args
-        self.assertEqual(endpoint, "repos/owner/repo/pulls")
-        self.assertTrue(payload["draft"])
-        self.assertEqual(payload["base"], "develop")
-        self.assertEqual(payload["head"], "feature/example")
-        self.assertIn("미실행", payload["body"])
-        self.assertNotIn("Closes #42", payload["body"])
-        self.assertIn("$(touch nope)", payload["title"])
+        self.assertEqual('repos/owner/repo/pulls', endpoint)
+        self.assertTrue(payload['draft'])
+        self.assertEqual('develop', payload['base'])
+        self.assertIn('브랜치 변경 통합', payload['title'])
+        for text in ('커밋 2개', 'src/Response.kt', '+10/-2', 'feat: response', 'fix: followup', '미실행'):
+            self.assertIn(text, payload['body'])
 
-    @patch("auto_pr.api")
-    def test_non_feature_branch_is_ignored(self, api):
-        os.environ["GITHUB_REF_NAME"] = "main"
+    @patch('auto_pr.api')
+    def test_rerun_updates_only_marked_sections(self, api):
+        original = self.body().replace('검증 명령: 미실행', '검증 명령: ./gradlew test')
+        original += '\n\n직접 작성한 메모'
+        pr = {'number': 1, 'base': {'ref': 'develop'}, 'body': original,
+              'html_url': 'https://example.test/1'}
+        self.changes['files'][0]['added'] = '30'
+        api.side_effect = [[pr], pr, pr]
         auto_pr.main()
-        api.assert_not_called()
+        payload = api.call_args.args[1]
+        self.assertEqual({'method': 'PATCH'}, api.call_args.kwargs)
+        self.assertEqual({'body'}, set(payload))
+        for text in ('+30/-2', './gradlew test', '직접 작성한 메모'):
+            self.assertIn(text, payload['body'])
 
-    def test_commit_mentions_are_not_published_as_notifications(self):
-        template = Path(".github/pull_request_template.md").read_text()
-        body = auto_pr.build_body(template, [{"sha": "abc1234", "commit": {
-            "message": "fix: @someone Closes #42 <script>"
-        }}], 1)
-        self.assertNotIn("@someone", body)
-        self.assertNotIn("Closes #42", body)
-        self.assertNotIn("<script>", body)
+    @patch('auto_pr.api')
+    def test_unchanged_rerun_does_not_write(self, api):
+        pr = {'number': 1, 'base': {'ref': 'develop'}, 'body': self.body(),
+              'html_url': 'https://example.test/1'}
+        api.side_effect = [[pr], pr]
+        auto_pr.main()
+        self.assertEqual(2, api.call_count)
 
-    @patch("auto_pr.api")
-    def test_permission_failure_is_not_silenced(self, api):
-        commit = {"sha": "a" * 40, "commit": {"message": "feat: example"}}
-        api.side_effect = [[], {"ahead_by": 1, "total_commits": 1, "commits": [commit]},
-                           commit, subprocess.CalledProcessError(1, "gh", stderr="Forbidden"), []]
+    def test_full_totals_even_when_display_is_limited(self):
+        self.changes['files'] *= 101
+        body = self.body()
+        self.assertIn('변경 파일 101개', body)
+        self.assertIn('+1010/-202', body)
+        self.assertIn('나머지 1개 파일', body)
+
+    def test_commit_text_is_not_an_instruction(self):
+        self.changes['commits'][0]['commit']['message'] = 'fix: @user Closes #42 <script> $(touch nope)'
+        body = self.body()
+        for text in ('@user', 'Closes #42', '<script>'):
+            self.assertNotIn(text, body)
+        self.assertIn('$(touch nope)', body)
+
+    @patch('auto_pr.api')
+    def test_permission_error_is_not_silenced(self, api):
+        api.side_effect = [[], subprocess.CalledProcessError(1, 'gh', stderr='Forbidden'), []]
         with self.assertRaises(subprocess.CalledProcessError):
             auto_pr.main()
 
-    @patch("auto_pr.api")
-    def test_concurrent_manual_pr_creation_is_preserved(self, api):
-        commit = {"sha": "a" * 40, "commit": {"message": "feat: example"}}
-        api.side_effect = [[], {"ahead_by": 1, "total_commits": 1, "commits": [commit]},
-                           commit, subprocess.CalledProcessError(1, "gh"),
-                           [{"html_url": "https://example.test/pr/3"}]]
+    @patch('auto_pr.api')
+    def test_creation_race_preserves_existing_pr(self, api):
+        api.side_effect = [[], subprocess.CalledProcessError(1, 'gh'),
+                           [{'html_url': 'https://example.test/1'}]]
         auto_pr.main()
-        self.assertEqual(api.call_count, 5)
+        self.assertEqual(3, api.call_count)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()
