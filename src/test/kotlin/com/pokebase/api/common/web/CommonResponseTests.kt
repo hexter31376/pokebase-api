@@ -1,6 +1,7 @@
 package com.pokebase.api.common.web
 
 import com.pokebase.api.common.error.CommonErrorCode
+import com.pokebase.api.common.error.ServerErrorCode
 import org.junit.jupiter.api.Test
 import tools.jackson.databind.json.JsonMapper
 import tools.jackson.module.kotlin.kotlinModule
@@ -87,6 +88,24 @@ class CommonResponseTests {
         assertJsonEquals(
             """{"success": false, "data": null, "error": null}""",
             CommonResponse.failure(),
+        )
+    }
+
+    @Test
+    fun `failure accepts server error codes through the shared factory`() {
+        assertJsonEquals(
+            """
+            {
+              "success": false,
+              "data": null,
+              "error": {
+                "code": "SERVER_001",
+                "message": "예상하지 못한 서버 에러가 발생했습니다. 개발자에게 문의해 주세요.",
+                "fields": []
+              }
+            }
+            """,
+            CommonResponse.failure(ApiError.from(ServerErrorCode.INTERNAL_SERVER_ERROR)),
         )
     }
 

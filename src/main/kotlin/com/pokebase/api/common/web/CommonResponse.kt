@@ -1,6 +1,6 @@
 package com.pokebase.api.common.web
 
-import com.pokebase.api.common.error.CommonErrorCode
+import com.pokebase.api.common.error.ErrorCode
 import org.springframework.data.domain.Page
 import org.springframework.data.web.PagedModel
 
@@ -25,7 +25,7 @@ data class ApiError(
     val fields: List<FieldErrorDetail> = emptyList(),
 ) {
     companion object {
-        fun from(code: CommonErrorCode, fields: List<FieldErrorDetail> = emptyList()): ApiError =
+        fun from(code: ErrorCode, fields: List<FieldErrorDetail> = emptyList()): ApiError =
             ApiError(code.code, code.message, fields)
     }
 }
